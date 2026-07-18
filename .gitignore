@@ -1,0 +1,5 @@
+# Runtime secrets and state
+telegram-tmux-control.env
+*.json
+__pycache__/
+*.py[cod]
