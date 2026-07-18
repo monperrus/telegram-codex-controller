@@ -5,16 +5,17 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# Replace with the unprivileged account that owns tmux and Codex.
-User=remote-tmux
-WorkingDirectory=/opt/telegram-tmux-controller
-Environment=TELEGRAM_TMUX_CONFIG=/home/remote-tmux/.config/telegram-tmux-control.env
-Environment=TELEGRAM_TMUX_STATE=/home/remote-tmux/.local/state/telegram-tmux-control.json
+# Replace every YOUR_USER and /path/to value before installing as a system service.
+# For the simpler per-user service, use ../install.sh instead.
+User=YOUR_USER
+WorkingDirectory=/path/to/telegram-codex-controller
+Environment=TELEGRAM_TMUX_CONFIG=/home/YOUR_USER/.config/telegram-tmux-control.env
+Environment=TELEGRAM_TMUX_STATE=/home/YOUR_USER/.local/state/telegram-tmux-control.json
 Environment=TELEGRAM_TMUX_SESSION=web
-Environment=TELEGRAM_TMUX_WORKSPACE=/home/remote-tmux
-Environment=TELEGRAM_TMUX_CODEX_BIN=/home/remote-tmux/.local/bin/codex
-Environment=TELEGRAM_TMUX_NODE_BIN=/home/remote-tmux/.local/node-v22.23.1/bin/node
-ExecStart=/opt/telegram-tmux-controller/telegram-tmux-control.py
+Environment=TELEGRAM_TMUX_WORKSPACE=/path/to/workspace
+Environment=TELEGRAM_TMUX_CODEX_BIN=/path/to/codex
+Environment=TELEGRAM_TMUX_NODE_BIN=/path/to/node
+ExecStart=/path/to/telegram-codex-controller/telegram-tmux-control.py
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=yes

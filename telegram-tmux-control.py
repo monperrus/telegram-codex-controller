@@ -4,18 +4,21 @@ import http.client
 import json
 import os
 import select
+import shutil
+import stat
 import subprocess
 import sys
 import threading
 import time
 import urllib.parse
 
-CONFIG_PATH = os.environ.get("TELEGRAM_TMUX_CONFIG", "/home/remote-tmux/.config/telegram-tmux-control.env")
-STATE_PATH = os.environ.get("TELEGRAM_TMUX_STATE", "/home/remote-tmux/.local/state/telegram-tmux-control.json")
+HOME = os.path.expanduser("~")
+CONFIG_PATH = os.environ.get("TELEGRAM_TMUX_CONFIG", os.path.join(HOME, ".config", "telegram-tmux-control.env"))
+STATE_PATH = os.environ.get("TELEGRAM_TMUX_STATE", os.path.join(HOME, ".local", "state", "telegram-tmux-control.json"))
 SESSION = os.environ.get("TELEGRAM_TMUX_SESSION", "web")
-WORKSPACE = os.environ.get("TELEGRAM_TMUX_WORKSPACE", "/home/remote-tmux")
-CODEX_BIN = os.environ.get("TELEGRAM_TMUX_CODEX_BIN", "/home/remote-tmux/.local/bin/codex")
-NODE_BIN = os.environ.get("TELEGRAM_TMUX_NODE_BIN", "/home/remote-tmux/.local/node-v22.23.1/bin/node")
+WORKSPACE = os.environ.get("TELEGRAM_TMUX_WORKSPACE", HOME)
+CODEX_BIN = os.environ.get("TELEGRAM_TMUX_CODEX_BIN", shutil.which("codex") or os.path.join(HOME, ".local", "bin", "codex"))
+NODE_BIN = os.environ.get("TELEGRAM_TMUX_NODE_BIN", shutil.which("node") or "node")
 
 
 def config():
@@ -32,9 +35,9 @@ def config():
     return values
 
 
-CFG = config()
+CFG = {}
 API_HOST = "api.telegram.org"
-API_PREFIX = f"/bot{CFG['BOT_TOKEN']}/"
+API_PREFIX = ""
 
 
 class CodexAppServer:
@@ -306,7 +309,69 @@ def handle(message, state):
         threading.Thread(target=run_remote_control, args=(chat_id, text), daemon=True).start()
 
 
+def executable(path):
+    return os.path.isfile(path) and os.access(path, os.X_OK) or bool(shutil.which(path))
+
+
+def check_requirements():
+    """Check the local setup without entering the Telegram polling loop."""
+    problems = []
+
+    try:
+        mode = stat.S_IMODE(os.stat(CONFIG_PATH).st_mode)
+        if mode & 0o077:
+            problems.append(f"config file is mode {mode:03o}, expected 600: {CONFIG_PATH}")
+        else:
+            print(f"OK: protected config file: {CONFIG_PATH}")
+    except OSError as error:
+        problems.append(f"cannot inspect config file {CONFIG_PATH}: {error}")
+
+    for label, path in (("Codex", CODEX_BIN), ("Node", NODE_BIN)):
+        if executable(path):
+            print(f"OK: {label}: {path}")
+        else:
+            problems.append(f"{label} executable not found: {path}")
+    if shutil.which("tmux"):
+        print("OK: tmux is on PATH")
+    else:
+        problems.append("tmux is not on PATH")
+    if os.path.isdir(WORKSPACE):
+        print(f"OK: workspace: {WORKSPACE}")
+    else:
+        problems.append(f"workspace is not a directory: {WORKSPACE}")
+
+    result = tmux("has-session", "-t", SESSION)
+    if result.returncode:
+        print(f"WARN: tmux session '{SESSION}' is unavailable", file=sys.stderr)
+    else:
+        print(f"OK: tmux session '{SESSION}'")
+    try:
+        bot = api("getMe")
+        print(f"OK: Telegram bot: @{bot.get('username', '(no username)')}")
+    except Exception as error:
+        problems.append(f"Telegram API preflight failed: {error}")
+
+    for problem in problems:
+        print(f"ERROR: {problem}", file=sys.stderr)
+    if problems:
+        return 1
+    print("Setup check passed.")
+    return 0
+
+
 def main():
+    global CFG, API_PREFIX
+    try:
+        CFG = config()
+    except (OSError, RuntimeError) as error:
+        print(f"telegram-tmux-control: configuration failed: {error}", file=sys.stderr)
+        return 1
+    API_PREFIX = f"/bot{CFG['BOT_TOKEN']}/"
+    if len(sys.argv) == 2 and sys.argv[1] == "--check":
+        return check_requirements()
+    if len(sys.argv) > 1:
+        print("Usage: telegram-tmux-control.py [--check]", file=sys.stderr)
+        return 2
     state = read_state()
     try:
         # Establish the sender's TLS connection before the first user message,
@@ -329,4 +394,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

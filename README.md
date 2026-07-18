@@ -28,35 +28,44 @@ from all other chats are silently ignored.
 
 ## Install
 
-1. Copy this release directory to a private location on the host.
-2. Create a config file with restricted permissions:
+For a user-level systemd service, clone the repository and run the installer:
 
-   ```sh
-   mkdir -p ~/.config ~/.local/state
-   cp telegram-tmux-control.env.example ~/.config/telegram-tmux-control.env
-   chmod 600 ~/.config/telegram-tmux-control.env
-   ```
+```sh
+git clone https://github.com/monperrus/telegram-codex-controller.git
+cd telegram-codex-controller
+./install.sh
+```
 
-3. Set `BOT_TOKEN` and a long, random `PAIR_CODE` in that config file.
-4. Set the paths and names for your host using environment variables. The
-   defaults are intentionally shown in the service example; change them if
-   your install lives elsewhere.
-5. Run it manually first:
+The installer securely prompts for the bot token, creates a mode-`600` config
+file, generates a pairing code, discovers local executables, and installs and
+starts `telegram-codex-controller.service`. It prints the `/pair` command at
+the end. To automate a non-interactive installation, provide `BOT_TOKEN` and
+optionally `PAIR_CODE` as environment variables:
 
-   ```sh
-   TELEGRAM_TMUX_CONFIG="$HOME/.config/telegram-tmux-control.env" \
-   TELEGRAM_TMUX_STATE="$HOME/.local/state/telegram-tmux-control.json" \
-   TELEGRAM_TMUX_SESSION=web \
-   TELEGRAM_TMUX_WORKSPACE="/path/to/workspace" \
-   TELEGRAM_TMUX_CODEX_BIN="/path/to/codex" \
-   TELEGRAM_TMUX_NODE_BIN="/path/to/node" \
-   ./telegram-tmux-control.py
-   ```
+```sh
+BOT_TOKEN='your-token' ./install.sh
+```
 
-6. In Telegram, send `/pair <your pairing code>` from the one chat that should
-   control the bot. Use `/help` to confirm it is working.
+Use `./install.sh --no-start` to install without starting, or `--force` to
+replace an existing config. The installed files live in
+`~/.local/share/telegram-codex-controller`; secrets remain in
+`~/.config/telegram-tmux-control.env`.
 
-For a persistent service, see the [systemd service example](systemd/telegram-tmux-controller.service.example).
+The service runs while you are logged in. To keep it running after logout or
+reboot, enable lingering once:
+
+```sh
+loginctl enable-linger "$USER"
+```
+
+To validate an installed setup without starting its polling loop:
+
+```sh
+~/.local/share/telegram-codex-controller/telegram-tmux-control.py --check
+```
+
+For a manually managed system service, adapt the
+[system service example](systemd/telegram-tmux-controller.service.example).
 
 ## Configuration
 
@@ -69,12 +78,12 @@ These optional environment variables configure the controller:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `TELEGRAM_TMUX_CONFIG` | `/home/remote-tmux/.config/telegram-tmux-control.env` | Secret config file. |
-| `TELEGRAM_TMUX_STATE` | `/home/remote-tmux/.local/state/telegram-tmux-control.json` | Pairing and Telegram update offset state. |
+| `TELEGRAM_TMUX_CONFIG` | `~/.config/telegram-tmux-control.env` | Secret config file. |
+| `TELEGRAM_TMUX_STATE` | `~/.local/state/telegram-tmux-control.json` | Pairing and Telegram update offset state. |
 | `TELEGRAM_TMUX_SESSION` | `web` | tmux target session. |
-| `TELEGRAM_TMUX_WORKSPACE` | `/home/remote-tmux` | Working directory passed to Codex. |
-| `TELEGRAM_TMUX_CODEX_BIN` | `/home/remote-tmux/.local/bin/codex` | Codex CLI executable. |
-| `TELEGRAM_TMUX_NODE_BIN` | `/home/remote-tmux/.local/node-v22.23.1/bin/node` | Node executable used to launch Codex. |
+| `TELEGRAM_TMUX_WORKSPACE` | `~` | Working directory passed to Codex. |
+| `TELEGRAM_TMUX_CODEX_BIN` | `codex` found on `PATH` | Codex CLI executable. |
+| `TELEGRAM_TMUX_NODE_BIN` | `node` found on `PATH` | Node executable used to launch Codex. |
 
 ## Operational notes
 
@@ -103,9 +112,9 @@ These optional environment variables configure the controller:
 ## Release contents
 
 - `telegram-tmux-control.py` — controller program.
+- `install.sh` — portable user-service installer.
 - `telegram-tmux-control.env.example` — safe secret-config template.
-- `systemd/` — optional service template.
-- `RELEASE-NOTES.md` — release scope and known constraints.
+- `systemd/` — user and system service templates.
 
 No license is included. Add an explicit license before distributing this code
 outside your organization.
