@@ -15,6 +15,11 @@ service.
 | `/status` | Reports whether the tmux session exists. |
 | `/interrupt` | Sends Ctrl-C to the tmux session. |
 
+For direct Codex requests (normal text or `/rc`), the bot reacts to the
+incoming message with 🫡, then sends a live `✏️ Changed` message when Codex
+first changes each file in the turn. It uses Codex app-server patch events;
+terminal-bridge (`/tmux`) edits are not tracked.
+
 The first chat must pair using a secret pairing code. Once paired, messages
 from all other chats are silently ignored.
 
@@ -75,13 +80,14 @@ These optional environment variables configure the controller:
 | `TELEGRAM_TMUX_WORKSPACE` | `/home/remote-tmux` | Working directory passed to Codex. |
 | `TELEGRAM_TMUX_CODEX_BIN` | `/home/remote-tmux/.local/bin/codex` | Codex CLI executable. |
 | `TELEGRAM_TMUX_NODE_BIN` | `/home/remote-tmux/.local/node-v22.23.1/bin/node` | Node executable used to launch Codex. |
+| `TELEGRAM_TMUX_TURN_TIMEOUT` | `180` | Seconds before an unresponsive Codex turn is stopped and the app-server is reset. |
 
 ## Operational notes
 
 - The bot uses long polling; do not run two controller instances with the same
   bot token, or they may consume each other's updates.
 - The sender connection is warmed at startup and kept alive, which minimizes
-  the delay before the `🫡` acknowledgement. Long polling uses a separate
+  the delay before the 🫡 acknowledgement. Long polling uses a separate
   connection, so it cannot block an acknowledgement or final reply.
 - The state file is written with mode `0600` and records the paired chat ID.
   Delete that file to allow pairing a different chat.

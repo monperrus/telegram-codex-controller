@@ -16,6 +16,9 @@ SESSION = os.environ.get("TELEGRAM_TMUX_SESSION", "web")
 WORKSPACE = os.environ.get("TELEGRAM_TMUX_WORKSPACE", "/home/remote-tmux")
 CODEX_BIN = os.environ.get("TELEGRAM_TMUX_CODEX_BIN", "/home/remote-tmux/.local/bin/codex")
 NODE_BIN = os.environ.get("TELEGRAM_TMUX_NODE_BIN", "/home/remote-tmux/.local/node-v22.23.1/bin/node")
+# A wedged app-server turn used to hold the single request lock for ten
+# minutes, leaving every later Telegram command silently queued behind it.
+TURN_TIMEOUT = int(os.environ.get("TELEGRAM_TMUX_TURN_TIMEOUT", "180"))
 
 
 def config():
@@ -100,6 +103,20 @@ class CodexAppServer:
         result = self._request("thread/start", {"cwd": WORKSPACE})
         self.thread_id = result["thread"]["id"]
 
+    def _stop(self):
+        """Discard an unhealthy app-server so the next request starts cleanly."""
+        process, self.process = self.process, None
+        self.thread_id = None
+        self.read_buffer = b""
+        if not process or process.poll() is not None:
+            return
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+
     @staticmethod
     def _text_from(value):
         if isinstance(value, str):
@@ -111,27 +128,50 @@ class CodexAppServer:
             return str(value.get("text") or value.get("delta") or "")
         return ""
 
-    def run(self, prompt):
+    def run(self, prompt, on_file_changes=None, on_agent_message=None):
+        """Run a turn and forward patch and completed agent-message events."""
         with self.lock:
             self._start()
             result = self._request("turn/start", {"threadId": self.thread_id, "input": [{"type": "text", "text": prompt}]})
             turn_id = result["turn"]["id"]
-            deadline = time.monotonic() + 600
-            answer = ""
+            deadline = time.monotonic() + TURN_TIMEOUT
+            answers = []
+            reported_paths = set()
             while True:
-                message = self._receive(max(0.1, deadline - time.monotonic()))
-                if message.get("method") == "item/agentMessage/delta":
-                    answer += self._text_from(message.get("params", {}))
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self._stop()
+                    raise TimeoutError(f"Codex turn timed out after {TURN_TIMEOUT} seconds; app-server reset")
+                try:
+                    message = self._receive(max(0.1, remaining))
+                except TimeoutError:
+                    self._stop()
+                    raise TimeoutError(f"Codex turn timed out after {TURN_TIMEOUT} seconds; app-server reset") from None
+                if message.get("method") == "item/fileChange/patchUpdated":
+                    params = message.get("params", {})
+                    if params.get("turnId") == turn_id and on_file_changes:
+                        for change in params.get("changes", []):
+                            path = change.get("path")
+                            if path and path not in reported_paths:
+                                # Patch updates repeat prior paths. Notify once,
+                                # immediately, when this file first changes.
+                                reported_paths.add(path)
+                                on_file_changes([change])
                 elif message.get("method") == "item/completed":
                     item = message.get("params", {}).get("item", {})
-                    if item.get("type") == "agentMessage" and not answer:
-                        answer = self._text_from(item)
+                    if item.get("type") == "agentMessage":
+                        text = self._text_from(item).strip()
+                        if text:
+                            if on_agent_message:
+                                on_agent_message(text)
+                            else:
+                                answers.append(text)
                 elif message.get("method") == "turn/completed":
                     turn = message.get("params", {}).get("turn", {})
                     if turn.get("id") == turn_id:
                         if turn.get("status") != "completed":
                             raise RuntimeError(f"Codex turn ended with status: {turn.get('status', 'unknown')}")
-                        return answer.strip() or "Codex completed without a text response."
+                        return "\n\n".join(answers) or "Codex completed without a text response."
 
 
 CODEX_RPC = CodexAppServer()
@@ -232,14 +272,43 @@ def delayed_screen(chat_id):
         print(f"telegram-tmux-control: delayed reply failed: {error}", file=sys.stderr, flush=True)
 
 
+def change_summary(change):
+    """Return a compact filename and added/removed line counts from a patch."""
+    path = change.get("path", "")
+    added = removed = 0
+    for line in change.get("diff", "").splitlines():
+        if line.startswith("+++") or line.startswith("---"):
+            continue
+        if line.startswith("+"):
+            added += 1
+        elif line.startswith("-"):
+            removed += 1
+    return f"✏️ Changed\n{os.path.basename(path)}  +{added} -{removed}"
+
+
 def run_remote_control(chat_id, prompt):
     """Run a Telegram request in the independent direct app-server thread."""
     try:
-        answer = CODEX_RPC.run(prompt)
-        reply(chat_id, answer)
+        def notify_file_changes(changes):
+            for change in changes:
+                reply(chat_id, change_summary(change))
+
+        def notify_agent_message(text):
+            reply(chat_id, text)
+
+        answer = CODEX_RPC.run(
+            prompt,
+            on_file_changes=notify_file_changes,
+            on_agent_message=notify_agent_message,
+        )
+        if answer != "Codex completed without a text response.":
+            reply(chat_id, answer)
     except Exception as error:
         print(f"telegram-tmux-control: app-server request failed: {error}", file=sys.stderr, flush=True)
-        reply(chat_id, f"Codex API request failed: {error}")
+        try:
+            reply(chat_id, f"Codex API request failed: {error}")
+        except Exception as reply_error:
+            print(f"telegram-tmux-control: failure reply failed: {reply_error}", file=sys.stderr, flush=True)
 
 
 def send_terminal(text):
@@ -251,6 +320,24 @@ def send_terminal(text):
 def reply(chat_id, text):
     # Plain text avoids Telegram markup interpretation of terminal output.
     api("sendMessage", {"chat_id": chat_id, "text": text[:4096]})
+
+
+def acknowledge(chat_id, message_id):
+    """Mark an accepted Codex request without adding a separate chat message."""
+    api("setMessageReaction", {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "reaction": json.dumps([{"type": "emoji", "emoji": "🫡"}]),
+    })
+
+
+def start_remote_control(chat_id, message_id, prompt):
+    """Acknowledge promptly, then run the request asynchronously."""
+    try:
+        acknowledge(chat_id, message_id)
+    except Exception as error:
+        print(f"telegram-tmux-control: reaction failed: {error}", file=sys.stderr, flush=True)
+    threading.Thread(target=run_remote_control, args=(chat_id, prompt), daemon=True).start()
 
 
 def permitted(chat_id, state):
@@ -295,15 +382,13 @@ def handle(message, state):
     elif command.startswith("/rc "):
         prompt = command[4:].strip()
         if prompt:
-            reply(chat_id, "🫡")
-            threading.Thread(target=run_remote_control, args=(chat_id, prompt), daemon=True).start()
+            start_remote_control(chat_id, message["message_id"], prompt)
         else:
             reply(chat_id, "Usage: /rc <prompt>")
     elif command.startswith("/"):
         reply(chat_id, "Unknown command. Use /help.")
     else:
-        reply(chat_id, "🫡")
-        threading.Thread(target=run_remote_control, args=(chat_id, text), daemon=True).start()
+        start_remote_control(chat_id, message["message_id"], text)
 
 
 def main():
