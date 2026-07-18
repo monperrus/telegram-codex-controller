@@ -372,7 +372,13 @@ def handle(message, state):
         reply(chat_id, f"tmux session '{SESSION}': " + ("available" if result.returncode == 0 else "unavailable"))
     elif command == "/interrupt":
         result = tmux("send-keys", "-t", SESSION, "C-c")
-        reply(chat_id, "Sent Ctrl-C." if result.returncode == 0 else "Unable to reach tmux.")
+        if result.returncode == 0:
+            try:
+                acknowledge(chat_id, message["message_id"])
+            except Exception as error:
+                print(f"telegram-tmux-control: reaction failed: {error}", file=sys.stderr, flush=True)
+        else:
+            reply(chat_id, "Unable to reach tmux.")
     elif command == "/tmux":
         reply(chat_id, "Usage: /tmux <text>")
     elif command.startswith("/tmux "):
