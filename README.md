@@ -1,4 +1,4 @@
-# Telegram tmux Controller
+# Telegram Codex Controller
 
 A private, single-user Telegram bot that can either send text to a named tmux
 session or submit a prompt to a local Codex app-server. It is designed for a
@@ -56,7 +56,7 @@ from all other chats are silently ignored.
 6. In Telegram, send `/pair <your pairing code>` from the one chat that should
    control the bot. Use `/help` to confirm it is working.
 
-For a persistent service, see [systemd/telegram-tmux-controller.service.example](systemd/telegram-tmux-controller.service.example).
+For a persistent service, see the [systemd service example](systemd/telegram-tmux-controller.service.example).
 
 ## Configuration
 
