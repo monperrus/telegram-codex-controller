@@ -15,7 +15,7 @@ Environment=TELEGRAM_TMUX_SESSION=web
 Environment=TELEGRAM_TMUX_WORKSPACE=/path/to/workspace
 Environment=TELEGRAM_TMUX_CODEX_BIN=/path/to/codex
 Environment=TELEGRAM_TMUX_NODE_BIN=/path/to/node
-ExecStart=/path/to/telegram-codex-controller/telegram-tmux-control.py
+ExecStart=/path/to/telegram-codex-controller/telegram-codex-control.py
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=yes

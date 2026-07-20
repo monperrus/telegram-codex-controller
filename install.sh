@@ -62,7 +62,7 @@ if [[ -e "$config_file" && "$force" -ne 1 ]]; then
 fi
 
 install -d -m 700 "$config_dir" "$state_dir" "$data_dir" "$unit_dir"
-install -m 755 "$source_dir/telegram-tmux-control.py" "$data_dir/telegram-tmux-control.py"
+install -m 755 "$source_dir/telegram-codex-control.py" "$data_dir/telegram-codex-control.py"
 install -m 644 "$source_dir/systemd/telegram-codex-controller.user.service" "$unit_dir/telegram-codex-controller.service"
 (umask 077; printf 'BOT_TOKEN=%s\nPAIR_CODE=%s\n' "$bot_token" "$pair_code" >"$config_file")
 
@@ -70,7 +70,7 @@ systemctl --user daemon-reload
 systemctl --user enable telegram-codex-controller.service
 if [[ "$start" -eq 1 ]]; then
   systemctl --user restart telegram-codex-controller.service
-  "$data_dir/telegram-tmux-control.py" --check
+  "$data_dir/telegram-codex-control.py" --check
 fi
 
 echo

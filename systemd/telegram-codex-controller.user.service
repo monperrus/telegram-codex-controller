@@ -10,7 +10,7 @@ Environment=TELEGRAM_TMUX_CONFIG=%h/.config/telegram-tmux-control.env
 Environment=TELEGRAM_TMUX_STATE=%h/.local/state/telegram-tmux-control.json
 Environment=TELEGRAM_TMUX_SESSION=web
 Environment=TELEGRAM_TMUX_WORKSPACE=%h
-ExecStart=%h/.local/share/telegram-codex-controller/telegram-tmux-control.py
+ExecStart=%h/.local/share/telegram-codex-controller/telegram-codex-control.py
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=yes

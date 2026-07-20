@@ -77,7 +77,7 @@ loginctl enable-linger "$USER"
 To validate an installed setup without starting its polling loop:
 
 ```sh
-~/.local/share/telegram-codex-controller/telegram-tmux-control.py --check
+~/.local/share/telegram-codex-controller/telegram-codex-control.py --check
 ```
 
 For a manually managed system service, adapt the
@@ -135,7 +135,7 @@ These optional environment variables configure the controller:
 
 ## Release contents
 
-- `telegram-tmux-control.py` — controller program.
+- `telegram-codex-control.py` — controller program.
 - `install.sh` — portable user-service installer.
 - `telegram-tmux-control.env.example` — safe secret-config template.
 - `systemd/` — user and system service templates.
