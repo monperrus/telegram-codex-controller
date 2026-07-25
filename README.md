@@ -13,6 +13,7 @@ service.
 | `/task <prompt>` | Queues a durable, long-running Codex task. |
 | `/tasks` | Shows recent queued, running, and completed tasks. |
 | `/task status|pause|resume|cancel <id>` | Manages a durable task. |
+| `/model` | Shows inline buttons for the Codex models available to the account; the selected model is used for future direct requests and newly queued tasks. |
 | `/usage` | Shows the current Codex quota, reset times, and available credits. |
 | `/tmux <text>` | Types text and Enter into the configured tmux session, then returns its recent output. |
 | `/screen` | Returns recent output from the tmux session. |

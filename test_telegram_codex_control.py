@@ -49,5 +49,59 @@ class UsageFormattingTests(unittest.TestCase):
         self.assertEqual(controller.format_usage({"rateLimits": {}}), "Codex usage")
 
 
+class ModelPickerTests(unittest.TestCase):
+    MODELS = [
+        {"model": "gpt-5.6-sol", "displayName": "GPT-5.6 Sol"},
+        {"model": "gpt-5.6-luna", "displayName": "GPT-5.6 Luna"},
+    ]
+
+    def test_picker_marks_the_selected_model_and_uses_inline_callbacks(self):
+        text, markup = controller.model_picker(self.MODELS, "gpt-5.6-luna")
+
+        self.assertIn("Current: gpt-5.6-luna", text)
+        self.assertEqual(markup["inline_keyboard"][0][0]["callback_data"], "model:gpt-5.6-sol")
+        self.assertEqual(markup["inline_keyboard"][0][1]["text"], "🚀 GPT-5.6 Luna")
+
+    def test_callback_validates_and_persists_the_selected_model(self):
+        original_rpc, original_api = controller.CODEX_RPC, controller.api
+        calls = []
+
+        class FakeRpc:
+            def models(self):
+                return ModelPickerTests.MODELS
+
+        try:
+            controller.CODEX_RPC = FakeRpc()
+            controller.api = lambda method, payload=None: calls.append((method, payload))
+            state = {"chat_id": 42}
+            controller.handle_callback({
+                "id": "callback-1",
+                "data": "model:gpt-5.6-sol",
+                "message": {"message_id": 7, "chat": {"id": 42}},
+            }, state)
+        finally:
+            controller.CODEX_RPC, controller.api = original_rpc, original_api
+
+        self.assertEqual(state["model"], "gpt-5.6-sol")
+        self.assertEqual(calls[0][0], "answerCallbackQuery")
+        self.assertEqual(calls[1][0], "editMessageText")
+
+
+class TaskSummaryTests(unittest.TestCase):
+    def test_completed_task_shows_execution_duration_not_age_since_completion(self):
+        summary = controller.task_summary({
+            "id": 9,
+            "status": "completed",
+            "created_at": 10,
+            "started_at": 20,
+            "finished_at": 95,
+            "prompt": "test",
+            "checkpoint": "",
+            "error": "",
+        })
+
+        self.assertEqual(summary, "T-9 completed (1m 15s)")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -137,11 +137,16 @@ class CodexAppServer:
             return str(value.get("text") or value.get("delta") or "")
         return ""
 
-    def run(self, prompt, on_file_changes=None, on_agent_message=None, timeout=TURN_TIMEOUT, cancelled=None):
+    def run(self, prompt, model=None, on_file_changes=None, on_agent_message=None, timeout=TURN_TIMEOUT, cancelled=None):
         """Run a turn and forward patch and completed agent-message events."""
         with self.lock:
             self._start()
-            result = self._request("turn/start", {"threadId": self.thread_id, "input": [{"type": "text", "text": prompt}]})
+            params = {"threadId": self.thread_id, "input": [{"type": "text", "text": prompt}]}
+            if model:
+                # The app-server applies a turn's model override to later
+                # turns in the same thread as well.
+                params["model"] = model
+            result = self._request("turn/start", params)
             turn_id = result["turn"]["id"]
             deadline = time.monotonic() + timeout
             answers = []
@@ -197,6 +202,22 @@ class CodexAppServer:
         with self.lock:
             self._start()
             return self._request("account/rateLimits/read", None)
+
+    def models(self):
+        """Return every model currently available to this Codex account."""
+        with self.lock:
+            self._start()
+            models = []
+            cursor = None
+            while True:
+                params = {"limit": 100}
+                if cursor:
+                    params["cursor"] = cursor
+                result = self._request("model/list", params)
+                models.extend(result.get("data", []))
+                cursor = result.get("nextCursor")
+                if not cursor:
+                    return models
 
 
 CODEX_RPC = CodexAppServer()
@@ -300,9 +321,15 @@ class TaskStore:
                     finished_at INTEGER,
                     updated_at INTEGER NOT NULL,
                     checkpoint TEXT NOT NULL DEFAULT '',
-                    error TEXT NOT NULL DEFAULT ''
+                    error TEXT NOT NULL DEFAULT '',
+                    model TEXT NOT NULL DEFAULT ''
                 )
             """)
+            # Existing task databases predate model selection. SQLite has no
+            # portable ADD COLUMN IF NOT EXISTS, so inspect before migrating.
+            columns = {row[1] for row in self.connection.execute("PRAGMA table_info(tasks)")}
+            if "model" not in columns:
+                self.connection.execute("ALTER TABLE tasks ADD COLUMN model TEXT NOT NULL DEFAULT ''")
             # A process cannot safely know whether an old in-flight turn made
             # changes. Leave it explicit for the owner to inspect and resume.
             self.connection.execute("UPDATE tasks SET status = 'interrupted', updated_at = ? WHERE status = 'running'", (int(time.time()),))
@@ -310,13 +337,13 @@ class TaskStore:
     def _row(self, row):
         return dict(row) if row else None
 
-    def create(self, chat_id, prompt):
+    def create(self, chat_id, prompt, model=None):
         now = int(time.time())
         with self.lock, self.connection:
             queued = self.connection.execute("SELECT count(*) FROM tasks WHERE status IN ('queued', 'running', 'cancelling')").fetchone()[0]
             if queued >= TASK_MAX_QUEUE:
                 raise RuntimeError(f"task queue is full ({TASK_MAX_QUEUE})")
-            cursor = self.connection.execute("INSERT INTO tasks (chat_id, prompt, status, created_at, updated_at) VALUES (?, ?, 'queued', ?, ?)", (str(chat_id), prompt, now, now))
+            cursor = self.connection.execute("INSERT INTO tasks (chat_id, prompt, model, status, created_at, updated_at) VALUES (?, ?, ?, 'queued', ?, ?)", (str(chat_id), prompt, model or "", now, now))
             return self.get(cursor.lastrowid)
 
     def get(self, task_id):
@@ -406,7 +433,7 @@ class TaskWorker:
                 def progress(text):
                     self.store.checkpoint(task_id, text)
 
-                answer = CODEX_RPC.run(task['prompt'], on_file_changes=changed,
+                answer = CODEX_RPC.run(task['prompt'], model=task['model'] or None, on_file_changes=changed,
                                        on_agent_message=progress, timeout=TASK_TIMEOUT,
                                        cancelled=lambda: self.store.cancelling(task_id))
                 self.store.finish(task_id, 'completed', answer)
@@ -461,7 +488,7 @@ def change_summary(change):
     return f"✏️ Changed\n{os.path.basename(path)}  +{added} -{removed}"
 
 
-def run_remote_control(chat_id, prompt):
+def run_remote_control(chat_id, prompt, model=None):
     """Run a Telegram request in the independent direct app-server thread."""
     try:
         def notify_file_changes(changes):
@@ -473,6 +500,7 @@ def run_remote_control(chat_id, prompt):
 
         answer = CODEX_RPC.run(
             prompt,
+            model=model,
             on_file_changes=notify_file_changes,
             on_agent_message=notify_agent_message,
         )
@@ -492,9 +520,12 @@ def send_terminal(text):
     return typed.returncode == 0 and entered.returncode == 0
 
 
-def reply(chat_id, text):
+def reply(chat_id, text, reply_markup=None):
     # Plain text avoids Telegram markup interpretation of terminal output.
-    api("sendMessage", {"chat_id": chat_id, "text": text[:4096]})
+    payload = {"chat_id": chat_id, "text": text[:4096]}
+    if reply_markup is not None:
+        payload["reply_markup"] = json.dumps(reply_markup)
+    return api("sendMessage", payload)
 
 
 def acknowledge(chat_id, message_id):
@@ -506,13 +537,13 @@ def acknowledge(chat_id, message_id):
     })
 
 
-def start_remote_control(chat_id, message_id, prompt):
+def start_remote_control(chat_id, message_id, prompt, model=None):
     """Acknowledge promptly, then run the request asynchronously."""
     try:
         acknowledge(chat_id, message_id)
     except Exception as error:
         print(f"telegram-tmux-control: reaction failed: {error}", file=sys.stderr, flush=True)
-    threading.Thread(target=run_remote_control, args=(chat_id, prompt), daemon=True).start()
+    threading.Thread(target=run_remote_control, args=(chat_id, prompt, model), daemon=True).start()
 
 
 def human_duration(seconds):
@@ -593,11 +624,86 @@ def report_usage(chat_id):
         reply(chat_id, f"Unable to retrieve Codex usage: {error}")
 
 
+def model_picker(models, selected_model=None):
+    """Build the text and inline keyboard for the live Codex model catalog."""
+    buttons = []
+    for entry in models:
+        model = entry.get("model")
+        if not isinstance(model, str) or not model:
+            continue
+        # Telegram callback data is capped at 64 bytes. Codex model names are
+        # short, but omit an unexpected overlong custom-provider identifier
+        # rather than sending a keyboard Telegram will reject.
+        callback_data = f"model:{model}"
+        if len(callback_data.encode("utf-8")) > 64:
+            continue
+        label = entry.get("displayName") or model
+        if model == selected_model:
+            label = f"🚀 {label}"
+        buttons.append({"text": str(label)[:64], "callback_data": callback_data})
+    rows = [buttons[index:index + 2] for index in range(0, len(buttons), 2)]
+    current = selected_model or "Codex default"
+    return f"Choose a Codex model. Current: {current}", {"inline_keyboard": rows}
+
+
+def show_model_picker(chat_id, selected_model=None):
+    try:
+        models = CODEX_RPC.models()
+        text, markup = model_picker(models, selected_model)
+        if not markup["inline_keyboard"]:
+            reply(chat_id, "No Codex models are currently available.")
+        else:
+            reply(chat_id, text, markup)
+    except Exception as error:
+        print(f"telegram-tmux-control: model list failed: {error}", file=sys.stderr, flush=True)
+        reply(chat_id, f"Unable to retrieve Codex models: {error}")
+
+
+def handle_callback(callback, state):
+    """Apply an inline model-picker choice from the paired Telegram chat."""
+    message = callback.get("message", {})
+    chat_id = message.get("chat", {}).get("id")
+    data = callback.get("data", "")
+    if chat_id is None or not permitted(chat_id, state) or not data.startswith("model:"):
+        return
+    requested_model = data[len("model:"):]
+    try:
+        # Validate against the account's current catalog; callback data can be
+        # forged or can outlive a model being removed from the account.
+        models = CODEX_RPC.models()
+        available = {entry.get("model") for entry in models}
+        if requested_model not in available:
+            api("answerCallbackQuery", {"callback_query_id": callback["id"], "text": "That model is no longer available."})
+            return
+        state["model"] = requested_model
+        api("answerCallbackQuery", {"callback_query_id": callback["id"], "text": f"Model set to {requested_model}"})
+        text, markup = model_picker(models, requested_model)
+        api("editMessageText", {
+            "chat_id": chat_id,
+            "message_id": message["message_id"],
+            "text": text,
+            "reply_markup": json.dumps(markup),
+        })
+    except Exception as error:
+        print(f"telegram-tmux-control: model selection failed: {error}", file=sys.stderr, flush=True)
+        try:
+            api("answerCallbackQuery", {"callback_query_id": callback["id"], "text": f"Unable to set model: {error}"})
+        except Exception:
+            pass
+
+
 def task_summary(task, detail=False):
     if not task:
         return "Task not found."
-    age = max(0, int(time.time()) - task['created_at'])
-    text = f"T-{task['id']} {task['status']} ({human_duration(age)})"
+    # Completed tasks should report time spent executing, not time elapsed
+    # since they completed. Queued tasks have not started, so their wait time
+    # is the only meaningful duration to show.
+    if task['started_at']:
+        ended_at = task['finished_at'] or int(time.time())
+        duration = max(0, ended_at - task['started_at'])
+    else:
+        duration = max(0, int(time.time()) - task['created_at'])
+    text = f"T-{task['id']} {task['status']} ({human_duration(duration)})"
     if detail:
         text += f"\nRequest: {task['prompt'][:700]}"
         if task['checkpoint']:
@@ -614,13 +720,13 @@ def task_id_from(command, prefix):
     return None
 
 
-def start_task(chat_id, message_id, prompt):
+def start_task(chat_id, message_id, prompt, model=None):
     try:
         acknowledge(chat_id, message_id)
     except Exception as error:
         print(f"telegram-tmux-control: reaction failed: {error}", file=sys.stderr, flush=True)
     try:
-        task = TASKS.create(chat_id, prompt)
+        task = TASKS.create(chat_id, prompt, model)
         TASK_WORKER.notify()
         reply(chat_id, f"Task T-{task['id']} queued. Use /task status {task['id']} to follow it.")
     except Exception as error:
@@ -648,7 +754,7 @@ def handle(message, state):
         # Do not reveal that a controller exists to unapproved chats.
         return
     if command in ("/start", "/help"):
-        reply(chat_id, "Normal text: direct Codex request. /rc <prompt>: explicit request. /task <prompt>: durable long-running task. /tasks; /task status|pause|resume|cancel <id>. /usage, /tmux <text>, /screen, /status, /interrupt.")
+        reply(chat_id, "Normal text: direct Codex request. /rc <prompt>: explicit request. /model: choose a Codex model. /task <prompt>: durable long-running task. /tasks; /task status|pause|resume|cancel <id>. /usage, /tmux <text>, /screen, /status, /interrupt.")
     elif command == "/tasks":
         tasks = TASKS.recent(6)
         reply(chat_id, "No tasks yet." if not tasks else "\n".join(task_summary(task) for task in tasks))
@@ -676,11 +782,13 @@ def handle(message, state):
     elif command.startswith("/task "):
         prompt = command[6:].strip()
         if prompt:
-            start_task(chat_id, message["message_id"], prompt)
+            start_task(chat_id, message["message_id"], prompt, state.get("model"))
         else:
             reply(chat_id, "Usage: /task <prompt>")
     elif command == "/usage":
         threading.Thread(target=report_usage, args=(chat_id,), daemon=True).start()
+    elif command == "/model":
+        threading.Thread(target=show_model_picker, args=(chat_id, state.get("model")), daemon=True).start()
     elif command == "/screen":
         reply(chat_id, screen())
     elif command == "/status":
@@ -707,13 +815,13 @@ def handle(message, state):
     elif command.startswith("/rc "):
         prompt = command[4:].strip()
         if prompt:
-            start_remote_control(chat_id, message["message_id"], prompt)
+            start_remote_control(chat_id, message["message_id"], prompt, state.get("model"))
         else:
             reply(chat_id, "Usage: /rc <prompt>")
     elif command.startswith("/"):
         reply(chat_id, "Unknown command. Use /help.")
     else:
-        start_remote_control(chat_id, message["message_id"], text)
+        start_remote_control(chat_id, message["message_id"], text, state.get("model"))
 
 
 def executable(path):
@@ -795,10 +903,13 @@ def main():
         print(f"telegram-tmux-control: sender preflight failed: {error}", file=sys.stderr, flush=True)
     while True:
         try:
-            updates = api("getUpdates", {"offset": state.get("offset", 0), "timeout": 30, "allowed_updates": json.dumps(["message"])})
+            updates = api("getUpdates", {"offset": state.get("offset", 0), "timeout": 30, "allowed_updates": json.dumps(["message", "callback_query"])})
             for update in updates:
                 state["offset"] = update["update_id"] + 1
-                handle(update.get("message", {}), state)
+                if "callback_query" in update:
+                    handle_callback(update["callback_query"], state)
+                else:
+                    handle(update.get("message", {}), state)
                 write_state(state)
         except KeyboardInterrupt:
             return
