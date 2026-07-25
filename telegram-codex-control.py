@@ -192,6 +192,12 @@ class CodexAppServer:
                             raise RuntimeError(f"Codex turn ended with status: {turn.get('status', 'unknown')}")
                         return "\n\n".join(answers) or "Codex completed without a text response."
 
+    def usage(self):
+        """Return the current account quota."""
+        with self.lock:
+            self._start()
+            return self._request("account/rateLimits/read", None)
+
 
 CODEX_RPC = CodexAppServer()
 
@@ -531,6 +537,62 @@ def human_duration(seconds):
     return f"{months}mo {days}d" if days else f"{months}mo"
 
 
+def format_reset_time(timestamp):
+    if not isinstance(timestamp, (int, float)):
+        return "reset time unavailable"
+    return time.strftime("%Y-%m-%d %H:%M %Z", time.localtime(timestamp))
+
+
+def format_limit_window(name, window):
+    if not isinstance(window, dict):
+        return None
+    used = window.get("usedPercent")
+    if not isinstance(used, (int, float)):
+        return None
+    text = f"{name}: {max(0, 100 - used):g}% remaining ({used:g}% used)"
+    if window.get("resetsAt") is not None:
+        text += f", resets {format_reset_time(window['resetsAt'])}"
+    return text
+
+
+def format_usage(rate_limits):
+    """Format the app-server account quota response for a Telegram reply."""
+    snapshot = rate_limits.get("rateLimits", {}) if isinstance(rate_limits, dict) else {}
+    lines = ["Codex usage"]
+    if snapshot.get("planType"):
+        lines.append(f"Plan: {snapshot['planType']}")
+    for name, key in (("Primary quota", "primary"), ("Secondary quota", "secondary")):
+        line = format_limit_window(name, snapshot.get(key))
+        if line:
+            lines.append(line)
+    if snapshot.get("rateLimitReachedType"):
+        lines.append(f"Limit status: {snapshot['rateLimitReachedType']}")
+
+    credits = snapshot.get("credits")
+    if isinstance(credits, dict):
+        if credits.get("unlimited"):
+            lines.append("Credits: unlimited")
+        elif credits.get("hasCredits"):
+            balance = credits.get("balance")
+            if balance is None:
+                lines.append("Credits: available")
+            elif str(balance).strip() not in ("", "0", "0.0", "0.00"):
+                lines.append(f"Credits: {balance}")
+
+    reset_credits = rate_limits.get("rateLimitResetCredits") if isinstance(rate_limits, dict) else None
+    if isinstance(reset_credits, dict) and isinstance(reset_credits.get("availableCount"), int) and reset_credits["availableCount"] > 0:
+        lines.append(f"Rate-limit reset credits: {reset_credits['availableCount']}")
+    return "\n".join(lines)
+
+
+def report_usage(chat_id):
+    try:
+        reply(chat_id, format_usage(CODEX_RPC.usage()))
+    except Exception as error:
+        print(f"telegram-tmux-control: usage request failed: {error}", file=sys.stderr, flush=True)
+        reply(chat_id, f"Unable to retrieve Codex usage: {error}")
+
+
 def task_summary(task, detail=False):
     if not task:
         return "Task not found."
@@ -586,7 +648,7 @@ def handle(message, state):
         # Do not reveal that a controller exists to unapproved chats.
         return
     if command in ("/start", "/help"):
-        reply(chat_id, "Normal text: direct Codex request. /rc <prompt>: explicit request. /task <prompt>: durable long-running task. /tasks; /task status|pause|resume|cancel <id>. /tmux <text>, /screen, /status, /interrupt.")
+        reply(chat_id, "Normal text: direct Codex request. /rc <prompt>: explicit request. /task <prompt>: durable long-running task. /tasks; /task status|pause|resume|cancel <id>. /usage, /tmux <text>, /screen, /status, /interrupt.")
     elif command == "/tasks":
         tasks = TASKS.recent(6)
         reply(chat_id, "No tasks yet." if not tasks else "\n".join(task_summary(task) for task in tasks))
@@ -617,6 +679,8 @@ def handle(message, state):
             start_task(chat_id, message["message_id"], prompt)
         else:
             reply(chat_id, "Usage: /task <prompt>")
+    elif command == "/usage":
+        threading.Thread(target=report_usage, args=(chat_id,), daemon=True).start()
     elif command == "/screen":
         reply(chat_id, screen())
     elif command == "/status":
