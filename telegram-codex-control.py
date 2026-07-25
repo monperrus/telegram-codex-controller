@@ -713,7 +713,7 @@ def main():
     if len(sys.argv) == 2 and sys.argv[1] == "--check":
         return check_requirements()
     if len(sys.argv) > 1:
-        print("Usage: telegram-tmux-control.py [--check]", file=sys.stderr)
+        print("Usage: telegram-codex-control.py [--check]", file=sys.stderr)
         return 2
     try:
         TASKS = TaskStore(TASK_STATE_PATH)
