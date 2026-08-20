@@ -186,10 +186,14 @@ class CodexAppServer:
                     if item.get("type") == "agentMessage":
                         text = self._text_from(item).strip()
                         if text:
+                            # Keep the terminal answer even when it is also
+                            # streamed to a callback.  Task callbacks persist
+                            # progress, and previously caused `answers` to
+                            # stay empty so a completed task was reported with
+                            # the misleading no-text placeholder.
+                            answers.append(text)
                             if on_agent_message:
                                 on_agent_message(text)
-                            else:
-                                answers.append(text)
                 elif message.get("method") == "turn/completed":
                     turn = message.get("params", {}).get("turn", {})
                     if turn.get("id") == turn_id:
@@ -491,11 +495,15 @@ def change_summary(change):
 def run_remote_control(chat_id, prompt, model=None):
     """Run a Telegram request in the independent direct app-server thread."""
     try:
+        sent_agent_message = False
+
         def notify_file_changes(changes):
             for change in changes:
                 reply(chat_id, change_summary(change))
 
         def notify_agent_message(text):
+            nonlocal sent_agent_message
+            sent_agent_message = True
             reply(chat_id, text)
 
         answer = CODEX_RPC.run(
@@ -504,7 +512,9 @@ def run_remote_control(chat_id, prompt, model=None):
             on_file_changes=notify_file_changes,
             on_agent_message=notify_agent_message,
         )
-        if answer != "Codex completed without a text response.":
+        # Agent messages have already been delivered live above.  Only send a
+        # final reply when no stream event was received, avoiding duplicates.
+        if answer != "Codex completed without a text response." and not sent_agent_message:
             reply(chat_id, answer)
     except Exception as error:
         print(f"telegram-tmux-control: app-server request failed: {error}", file=sys.stderr, flush=True)
