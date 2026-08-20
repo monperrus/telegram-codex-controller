@@ -11,7 +11,7 @@ service.
 | --- | --- |
 | Normal text or `/rc <prompt>` | Sends the prompt to a dedicated local Codex app-server thread. |
 | `/task <prompt>` | Queues a durable, long-running Codex task. |
-| `/tasks` | Shows recent queued, running, and completed tasks. |
+| `/tasks` | Shows recent queued, running, and completed tasks as buttons; tap one for its full status, request, latest update, and error. |
 | `/task status|pause|resume|cancel <id>` | Manages a durable task. |
 | `/model` | Shows inline buttons for the Codex models available to the account; the selected model is used for future direct requests and newly queued tasks. |
 | `/usage` | Shows the current Codex quota, reset times, and available credits. |

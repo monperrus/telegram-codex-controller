@@ -660,11 +660,21 @@ def show_model_picker(chat_id, selected_model=None):
 
 
 def handle_callback(callback, state):
-    """Apply an inline model-picker choice from the paired Telegram chat."""
+    """Handle a paired inline model or task-list choice."""
     message = callback.get("message", {})
     chat_id = message.get("chat", {}).get("id")
     data = callback.get("data", "")
-    if chat_id is None or not permitted(chat_id, state) or not data.startswith("model:"):
+    if chat_id is None or not permitted(chat_id, state):
+        return
+    if data.startswith("task:"):
+        task_id = task_id_from(data, "task:")
+        try:
+            api("answerCallbackQuery", {"callback_query_id": callback["id"]})
+            reply(chat_id, task_summary(TASKS.get(task_id), detail=True) if task_id else "Task not found.")
+        except Exception as error:
+            print(f"telegram-tmux-control: task selection failed: {error}", file=sys.stderr, flush=True)
+        return
+    if not data.startswith("model:"):
         return
     requested_model = data[len("model:"):]
     try:
@@ -713,6 +723,22 @@ def task_summary(task, detail=False):
     return text
 
 
+def tasks_summary(limit=6):
+    """Return the recent-task overview and a detail button for each task."""
+    tasks = TASKS.recent(limit)
+    if not tasks:
+        return "No tasks yet.", None
+    buttons = []
+    for task in tasks:
+        # IDs are short numeric values, keeping callback data comfortably
+        # within Telegram's 64-byte limit.
+        buttons.append({
+            "text": task_summary(task)[:64],
+            "callback_data": f"task:{task['id']}",
+        })
+    return "Select a task for details:", {"inline_keyboard": [[button] for button in buttons]}
+
+
 def task_id_from(command, prefix):
     value = command[len(prefix):].strip()
     if value.isdigit() and int(value) > 0:
@@ -756,8 +782,8 @@ def handle(message, state):
     if command in ("/start", "/help"):
         reply(chat_id, "Normal text: direct Codex request. /rc <prompt>: explicit request. /model: choose a Codex model. /task <prompt>: durable long-running task. /tasks; /task status|pause|resume|cancel <id>. /usage, /tmux <text>, /screen, /status, /interrupt.")
     elif command == "/tasks":
-        tasks = TASKS.recent(6)
-        reply(chat_id, "No tasks yet." if not tasks else "\n".join(task_summary(task) for task in tasks))
+        text, markup = tasks_summary()
+        reply(chat_id, text, markup)
     elif command == "/task":
         reply(chat_id, "Usage: /task <prompt>, /task status <id>, /task pause <id>, /task resume <id>, or /task cancel <id>")
     elif command.startswith("/task status "):

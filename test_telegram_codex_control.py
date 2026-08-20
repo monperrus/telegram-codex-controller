@@ -102,6 +102,66 @@ class TaskSummaryTests(unittest.TestCase):
 
         self.assertEqual(summary, "T-9 completed (1m 15s)")
 
+    def test_tasks_summary_builds_a_detail_button_for_each_recent_task(self):
+        original_tasks = controller.TASKS
+
+        class FakeTasks:
+            def recent(self, limit):
+                self.limit = limit
+                return [{
+                    "id": 4,
+                    "status": "running",
+                    "created_at": 10,
+                    "started_at": 20,
+                    "finished_at": None,
+                    "prompt": "test",
+                    "checkpoint": "",
+                    "error": "",
+                }]
+
+        try:
+            controller.TASKS = FakeTasks()
+            text, markup = controller.tasks_summary()
+        finally:
+            controller.TASKS = original_tasks
+
+        self.assertEqual(text, "Select a task for details:")
+        self.assertEqual(markup["inline_keyboard"][0][0]["callback_data"], "task:4")
+        self.assertIn("T-4 running", markup["inline_keyboard"][0][0]["text"])
+
+    def test_task_callback_replies_with_task_detail(self):
+        original_tasks, original_api = controller.TASKS, controller.api
+        calls = []
+
+        class FakeTasks:
+            def get(self, task_id):
+                self.task_id = task_id
+                return {
+                    "id": task_id,
+                    "status": "completed",
+                    "created_at": 10,
+                    "started_at": 20,
+                    "finished_at": 80,
+                    "prompt": "detail request",
+                    "checkpoint": "done",
+                    "error": "",
+                }
+
+        try:
+            controller.TASKS = FakeTasks()
+            controller.api = lambda method, payload=None: calls.append((method, payload))
+            controller.handle_callback({
+                "id": "callback-2",
+                "data": "task:4",
+                "message": {"message_id": 8, "chat": {"id": 42}},
+            }, {"chat_id": 42})
+        finally:
+            controller.TASKS, controller.api = original_tasks, original_api
+
+        self.assertEqual(calls[0][0], "answerCallbackQuery")
+        self.assertEqual(calls[1][0], "sendMessage")
+        self.assertIn("Request: detail request", calls[1][1]["text"])
+
 
 if __name__ == "__main__":
     unittest.main()
