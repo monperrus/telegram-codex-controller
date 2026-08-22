@@ -15,6 +15,8 @@ service.
 | `/task status|pause|resume|cancel <id>` | Manages a durable task. |
 | `/model` | Shows inline buttons for the Codex models available to the account; the selected model is used for future direct requests and newly queued tasks. |
 | `/usage` | Shows the current Codex quota, reset times, and available credits. |
+| `/queue <session-uuid> <prompt>` | Queues a message for a session on Codex's shared local app-server daemon. |
+| `/agents` | Explains how to browse shared-daemon sessions locally and obtain a session UUID for `/queue`. |
 | `/tmux <text>` | Types text and Enter into the configured tmux session, then returns its recent output. |
 | `/screen` | Returns recent output from the tmux session. |
 | `/status` | Reports whether the tmux session exists. |
@@ -106,6 +108,8 @@ These optional environment variables configure the controller:
 | `TELEGRAM_TMUX_TASK_STATE` | `~/.local/state/telegram-tmux-tasks.sqlite3` | Durable SQLite task queue. |
 | `TELEGRAM_TMUX_TASK_TIMEOUT` | `3600` | Maximum seconds for one long-running `/task` turn. |
 | `TELEGRAM_TMUX_TASK_MAX_QUEUE` | `20` | Maximum queued or active long tasks. |
+| `TELEGRAM_TMUX_CODEX_REMOTE` | unset | Optional shared Codex daemon endpoint passed to `codex queue`; omit for local daemon discovery. |
+| `TELEGRAM_TMUX_CODEX_REMOTE_AUTH_TOKEN_ENV` | unset | Optional environment-variable name containing the bearer token for that remote daemon. |
 
 ## Operational notes
 
@@ -123,6 +127,11 @@ These optional environment variables configure the controller:
 - `/tmux` and the Codex API can execute actions on your host. Give access only
   to a Telegram account you fully trust, and keep the token and pairing code
   out of source control and logs.
+- `/queue` targets a Codex session on the shared app-server daemon; it is
+  separate from the controller's own private direct-request thread. Use
+  `codex agents` in a terminal on the same host to find the target session's
+  UUID. The current Codex CLI exposes that browser interactively only, so the
+  controller intentionally does not scrape it into Telegram buttons.
 - The controller limits outgoing Telegram text to the API's 4096-character
   limit. The tmux response is limited to recent output.
 

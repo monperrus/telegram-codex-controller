@@ -28,6 +28,11 @@ TURN_TIMEOUT = int(os.environ.get("TELEGRAM_TMUX_TURN_TIMEOUT", "180"))
 TASK_STATE_PATH = os.environ.get("TELEGRAM_TMUX_TASK_STATE", os.path.join(HOME, ".local", "state", "telegram-tmux-tasks.sqlite3"))
 TASK_TIMEOUT = int(os.environ.get("TELEGRAM_TMUX_TASK_TIMEOUT", "3600"))
 TASK_MAX_QUEUE = int(os.environ.get("TELEGRAM_TMUX_TASK_MAX_QUEUE", "20"))
+# `codex queue` targets Codex's shared local app-server daemon.  Leave this
+# unset for the CLI's normal local-daemon discovery; it may instead point at a
+# remote daemon (for example, ws://127.0.0.1:8787).
+CODEX_REMOTE = os.environ.get("TELEGRAM_TMUX_CODEX_REMOTE", "")
+CODEX_REMOTE_AUTH_TOKEN_ENV = os.environ.get("TELEGRAM_TMUX_CODEX_REMOTE_AUTH_TOKEN_ENV", "")
 
 
 def config():
@@ -530,6 +535,32 @@ def send_terminal(text):
     return typed.returncode == 0 and entered.returncode == 0
 
 
+def codex_cli_command(*args):
+    """Build a Codex CLI command for either a wrapper or a Node entrypoint."""
+    if (os.path.isfile(CODEX_BIN) and os.access(CODEX_BIN, os.X_OK)) or shutil.which(CODEX_BIN):
+        return [CODEX_BIN, *args]
+    return [NODE_BIN, CODEX_BIN, *args]
+
+
+def queue_shared_session(thread_id, message):
+    """Queue a message on a Codex session served by the shared daemon.
+
+    This deliberately goes through the Codex CLI instead of this controller's
+    private stdio app-server.  The CLI owns daemon discovery and remains
+    compatible when the shared-daemon transport changes.
+    """
+    command = codex_cli_command("queue", "--thread", thread_id, "--message", message)
+    if CODEX_REMOTE:
+        command.extend(("--remote", CODEX_REMOTE))
+    if CODEX_REMOTE_AUTH_TOKEN_ENV:
+        command.extend(("--remote-auth-token-env", CODEX_REMOTE_AUTH_TOKEN_ENV))
+    result = subprocess.run(command, text=True, capture_output=True, timeout=30)
+    if result.returncode:
+        detail = (result.stderr or result.stdout).strip()
+        raise RuntimeError(detail or f"codex queue exited with status {result.returncode}")
+    return result.stdout.strip()
+
+
 def reply(chat_id, text, reply_markup=None):
     # Plain text avoids Telegram markup interpretation of terminal output.
     payload = {"chat_id": chat_id, "text": text[:4096]}
@@ -554,6 +585,24 @@ def start_remote_control(chat_id, message_id, prompt, model=None):
     except Exception as error:
         print(f"telegram-tmux-control: reaction failed: {error}", file=sys.stderr, flush=True)
     threading.Thread(target=run_remote_control, args=(chat_id, prompt, model), daemon=True).start()
+
+
+def queue_remote_session(chat_id, message_id, thread_id, prompt):
+    """Acknowledge and queue a follow-up on a shared-daemon Codex session."""
+    try:
+        acknowledge(chat_id, message_id)
+    except Exception as error:
+        print(f"telegram-tmux-control: reaction failed: {error}", file=sys.stderr, flush=True)
+
+    def queue_message():
+        try:
+            output = queue_shared_session(thread_id, prompt)
+            reply(chat_id, f"Queued for Codex session {thread_id}." + (f"\n{output}" if output else ""))
+        except Exception as error:
+            print(f"telegram-tmux-control: shared-session queue failed: {error}", file=sys.stderr, flush=True)
+            reply(chat_id, f"Unable to queue message for Codex session {thread_id}: {error}")
+
+    threading.Thread(target=queue_message, daemon=True).start()
 
 
 def human_duration(seconds):
@@ -790,7 +839,7 @@ def handle(message, state):
         # Do not reveal that a controller exists to unapproved chats.
         return
     if command in ("/start", "/help"):
-        reply(chat_id, "Normal text: direct Codex request. /rc <prompt>: explicit request. /model: choose a Codex model. /task <prompt>: durable long-running task. /tasks; /task status|pause|resume|cancel <id>. /usage, /tmux <text>, /screen, /status, /interrupt.")
+        reply(chat_id, "Normal text: direct Codex request. /rc <prompt>: explicit request. /model: choose a Codex model. /task <prompt>: durable long-running task. /tasks; /task status|pause|resume|cancel <id>. /queue <session-uuid> <prompt>: add work to a shared Codex session. /agents explains how to find a session UUID. /usage, /tmux <text>, /screen, /status, /interrupt.")
     elif command == "/tasks":
         text, markup = tasks_summary()
         reply(chat_id, text, markup)
@@ -823,6 +872,16 @@ def handle(message, state):
             reply(chat_id, "Usage: /task <prompt>")
     elif command == "/usage":
         threading.Thread(target=report_usage, args=(chat_id,), daemon=True).start()
+    elif command == "/agents":
+        reply(chat_id, "Run `codex agents` in a terminal on this host to browse the shared-daemon sessions and copy its session UUID. Then send /queue <session-uuid> <prompt>. Codex currently provides no non-interactive agents output for safe Telegram buttons.")
+    elif command == "/queue":
+        reply(chat_id, "Usage: /queue <session-uuid> <prompt>. Find the UUID with `codex agents` on the host.")
+    elif command.startswith("/queue "):
+        parts = command.split(maxsplit=2)
+        if len(parts) == 3 and parts[1] and parts[2].strip():
+            queue_remote_session(chat_id, message["message_id"], parts[1], parts[2].strip())
+        else:
+            reply(chat_id, "Usage: /queue <session-uuid> <prompt>. Find the UUID with `codex agents` on the host.")
     elif command == "/model":
         threading.Thread(target=show_model_picker, args=(chat_id, state.get("model")), daemon=True).start()
     elif command == "/screen":

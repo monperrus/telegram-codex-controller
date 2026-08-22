@@ -1,5 +1,6 @@
 import importlib.util
 import pathlib
+import subprocess
 import unittest
 
 
@@ -161,6 +162,40 @@ class TaskSummaryTests(unittest.TestCase):
         self.assertEqual(calls[0][0], "answerCallbackQuery")
         self.assertEqual(calls[1][0], "sendMessage")
         self.assertIn("Request: detail request", calls[1][1]["text"])
+
+
+class SharedSessionQueueTests(unittest.TestCase):
+    def test_queue_uses_cli_arguments_and_optional_remote_settings(self):
+        original_run = controller.subprocess.run
+        original_remote = controller.CODEX_REMOTE
+        original_auth_env = controller.CODEX_REMOTE_AUTH_TOKEN_ENV
+        calls = []
+        try:
+            controller.CODEX_REMOTE = "ws://127.0.0.1:8787"
+            controller.CODEX_REMOTE_AUTH_TOKEN_ENV = "CODEX_DAEMON_TOKEN"
+            controller.subprocess.run = lambda *args, **kwargs: calls.append((args, kwargs)) or subprocess.CompletedProcess(args[0], 0, "queued\n", "")
+            output = controller.queue_shared_session("session-123", "continue the refactor")
+        finally:
+            controller.subprocess.run = original_run
+            controller.CODEX_REMOTE = original_remote
+            controller.CODEX_REMOTE_AUTH_TOKEN_ENV = original_auth_env
+
+        self.assertEqual(output, "queued")
+        self.assertEqual(calls[0][0][0], controller.codex_cli_command(
+            "queue", "--thread", "session-123",
+            "--message", "continue the refactor", "--remote", "ws://127.0.0.1:8787",
+            "--remote-auth-token-env", "CODEX_DAEMON_TOKEN",
+        ))
+        self.assertEqual(calls[0][1], {"text": True, "capture_output": True, "timeout": 30})
+
+    def test_queue_reports_cli_error(self):
+        original_run = controller.subprocess.run
+        try:
+            controller.subprocess.run = lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 1, "", "session not found")
+            with self.assertRaisesRegex(RuntimeError, "session not found"):
+                controller.queue_shared_session("missing", "hello")
+        finally:
+            controller.subprocess.run = original_run
 
 
 if __name__ == "__main__":
