@@ -525,7 +525,7 @@ def take_inbox(state):
         except RuntimeError as error:  # queue full: leave it pending, retry later
             print(f"telegram-tmux-control: inbox: {error}", file=sys.stderr, flush=True)
             return
-        INBOX.ack(path)
+        INBOX.ack(path, f"queued as task T-{task['id']}", data={"task": task["id"]})
         TASK_WORKER.notify()
         first = str(msg["text"]).strip().splitlines()[0][:200]
         reply(chat_id, f"📬 Inbox {INBOX_TOPIC}: {origin['sender'] or '?'} (user {origin['poster']}) "

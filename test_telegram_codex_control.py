@@ -239,8 +239,11 @@ class AgentInboxTests(unittest.TestCase):
     def test_message_becomes_a_task_and_its_answer_goes_to_the_reply_topic(self):
         self.inbox.post("codex_pellow", "clean stale checkouts", sender="crystal-clear", reply_to="crystal-clear")
         controller.take_inbox({"chat_id": 42, "model": "m"})
+        (msg_id,) = [p.name for p in (pathlib.Path(self.tmp.name) / "inbox" / "codex_pellow" / "cur").glob("*.json")]
         self.assertEqual(self.inbox.pending("codex_pellow"), [])  # acked once durably queued
         task = controller.TASKS.claim()
+        record = self.inbox.ack_record("codex_pellow", msg_id)
+        self.assertEqual((record["text"], record["data"]), (f"queued as task T-{task['id']}", {"task": task["id"]}))
         self.assertIn("Message from agent crystal-clear (Unix user ", task["prompt"])
         self.assertIn("posted back to agent-inbox topic crystal-clear", task["prompt"])
         self.assertTrue(task["prompt"].endswith("clean stale checkouts"))
