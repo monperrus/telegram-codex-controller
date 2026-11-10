@@ -33,6 +33,12 @@ TASK_MAX_QUEUE = int(os.environ.get("TELEGRAM_TMUX_TASK_MAX_QUEUE", "20"))
 # remote daemon (for example, ws://127.0.0.1:8787).
 CODEX_REMOTE = os.environ.get("TELEGRAM_TMUX_CODEX_REMOTE", "")
 CODEX_REMOTE_AUTH_TOKEN_ENV = os.environ.get("TELEGRAM_TMUX_CODEX_REMOTE_AUTH_TOKEN_ENV", "")
+# Agent inbox: other agents on the host (other Unix users included) post to a
+# topic of agent-fleet's agent_inbox.py; each message becomes a durable task
+# and its result is posted to the sender's reply topic. AGENT_INBOX (config
+# file or TELEGRAM_TMUX_AGENT_INBOX) names the topic; unset disables it.
+AGENT_INBOX_MODULE = os.environ.get("TELEGRAM_TMUX_AGENT_INBOX_MODULE", os.path.expanduser("~/bin/agent_inbox.py"))
+AGENT_INBOX_POLL = float(os.environ.get("TELEGRAM_TMUX_AGENT_INBOX_POLL", "5"))
 
 
 def config():
@@ -339,6 +345,8 @@ class TaskStore:
             columns = {row[1] for row in self.connection.execute("PRAGMA table_info(tasks)")}
             if "model" not in columns:
                 self.connection.execute("ALTER TABLE tasks ADD COLUMN model TEXT NOT NULL DEFAULT ''")
+            if "origin" not in columns:  # JSON: the agent-inbox message a task answers
+                self.connection.execute("ALTER TABLE tasks ADD COLUMN origin TEXT NOT NULL DEFAULT ''")
             # A process cannot safely know whether an old in-flight turn made
             # changes. Leave it explicit for the owner to inspect and resume.
             self.connection.execute("UPDATE tasks SET status = 'interrupted', updated_at = ? WHERE status = 'running'", (int(time.time()),))
@@ -346,13 +354,13 @@ class TaskStore:
     def _row(self, row):
         return dict(row) if row else None
 
-    def create(self, chat_id, prompt, model=None):
+    def create(self, chat_id, prompt, model=None, origin=None):
         now = int(time.time())
         with self.lock, self.connection:
             queued = self.connection.execute("SELECT count(*) FROM tasks WHERE status IN ('queued', 'running', 'cancelling')").fetchone()[0]
             if queued >= TASK_MAX_QUEUE:
                 raise RuntimeError(f"task queue is full ({TASK_MAX_QUEUE})")
-            cursor = self.connection.execute("INSERT INTO tasks (chat_id, prompt, model, status, created_at, updated_at) VALUES (?, ?, ?, 'queued', ?, ?)", (str(chat_id), prompt, model or "", now, now))
+            cursor = self.connection.execute("INSERT INTO tasks (chat_id, prompt, model, status, created_at, updated_at, origin) VALUES (?, ?, ?, 'queued', ?, ?, ?)", (str(chat_id or ""), prompt, model or "", now, now, json.dumps(origin) if origin else ""))
             return self.get(cursor.lastrowid)
 
     def get(self, task_id):
@@ -434,6 +442,7 @@ class TaskWorker:
                 self.wake.clear()
                 continue
             task_id, chat_id = task['id'], task['chat_id']
+            origin = json.loads(task.get('origin') or '{}')
             try:
                 def changed(changes):
                     for change in changes:
@@ -447,14 +456,102 @@ class TaskWorker:
                                        cancelled=lambda: self.store.cancelling(task_id))
                 self.store.finish(task_id, 'completed', answer)
                 reply(chat_id, f"Task T-{task_id} completed.\n{answer}")
+                answer_inbox(origin, answer)
             except TaskCancelled:
                 self.store.finish(task_id, 'cancelled', 'Cancelled by user.')
                 reply(chat_id, f"Task T-{task_id} cancelled.")
+                answer_inbox(origin, f"Task T-{task_id} was cancelled by the operator.")
             except Exception as error:
                 message = str(error)
                 self.store.finish(task_id, 'failed', error=message)
                 print(f"telegram-tmux-control: task T-{task_id} failed: {message}", file=sys.stderr, flush=True)
                 reply(chat_id, f"Task T-{task_id} failed: {message}\nUse /task resume {task_id} after reviewing it.")
+                answer_inbox(origin, f"Task T-{task_id} failed: {message}")
+
+
+INBOX = None  # the agent_inbox module, loaded when a topic is configured
+INBOX_TOPIC = ""
+
+
+def load_agent_inbox(path=None):
+    import importlib.machinery
+    import importlib.util
+    path = path or AGENT_INBOX_MODULE
+    loader = importlib.machinery.SourceFileLoader("agent_inbox", path)
+    spec = importlib.util.spec_from_loader("agent_inbox", loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def inbox_prompt(topic, msg):
+    """The task prompt for one inbox message: who sent it, then the text."""
+    sender = msg.get("sender") or "an unnamed agent"
+    reply_to = msg.get("reply_to")
+    where = (f"Your final answer is posted back to agent-inbox topic {reply_to}."
+             if reply_to else "The sender gave no reply topic: only the operator sees your answer.")
+    refs = msg.get("refs") or []
+    body = str(msg["text"]).strip() + ("\n\nrefs:\n" + "\n".join(f"- {r}" for r in refs) if refs else "")
+    return (f"[Message from agent {sender} (Unix user {msg.get('poster', '?')}) via agent-inbox topic "
+            f"{topic}, posted {msg.get('posted_at', '?')}. It was not typed by the operator. {where}]\n\n{body}")
+
+
+def answer_inbox(origin, text):
+    """Post a task's result to the reply topic of the inbox message it came from."""
+    reply_to = (origin or {}).get("reply_to")
+    if not reply_to or INBOX is None:
+        return
+    try:
+        INBOX.post(reply_to, text or "(empty answer)", sender=INBOX_TOPIC, kind="peer", reply_to=INBOX_TOPIC)
+    except Exception as error:
+        print(f"telegram-tmux-control: inbox reply to {reply_to} failed: {error}", file=sys.stderr, flush=True)
+
+
+def take_inbox(state):
+    """Queue every pending inbox message as a durable task, then ack it."""
+    for path in INBOX.pending(INBOX_TOPIC):
+        try:
+            msg = INBOX.read(path)
+        except (OSError, ValueError) as error:
+            print(f"telegram-tmux-control: inbox: skipped {path.name}: {error}", file=sys.stderr, flush=True)
+            INBOX.ack(path)
+            continue
+        origin = {"id": path.name, "sender": msg.get("sender", ""), "poster": msg.get("poster", ""),
+                  "reply_to": msg.get("reply_to", "")}
+        chat_id = state.get("chat_id")
+        try:
+            task = TASKS.create(chat_id, inbox_prompt(INBOX_TOPIC, msg), state.get("model"), origin=origin)
+        except RuntimeError as error:  # queue full: leave it pending, retry later
+            print(f"telegram-tmux-control: inbox: {error}", file=sys.stderr, flush=True)
+            return
+        INBOX.ack(path)
+        TASK_WORKER.notify()
+        first = str(msg["text"]).strip().splitlines()[0][:200]
+        reply(chat_id, f"📬 Inbox {INBOX_TOPIC}: {origin['sender'] or '?'} (user {origin['poster']}) "
+                       f"queued T-{task['id']}" + (f", answer to {origin['reply_to']}" if origin['reply_to'] else "")
+                       + f"\n{first}")
+
+
+def start_inbox(topic, state, peers=()):
+    """Claim the topic (one consumer per topic) and poll it in a thread."""
+    global INBOX, INBOX_TOPIC
+    module = load_agent_inbox()
+    for change in module.open_topic(topic, list(peers)):  # ~/.agent-inbox/<topic>, ACLs for the peers
+        print(f"agent inbox: {change}", file=sys.stderr, flush=True)
+    lock = module.ConsumerLock(topic, "auto")
+    lock.acquire()
+    INBOX, INBOX_TOPIC = module, topic
+
+    def loop():
+        while True:
+            try:
+                take_inbox(state)
+            except Exception as error:
+                print(f"telegram-tmux-control: inbox: {error}", file=sys.stderr, flush=True)
+            time.sleep(AGENT_INBOX_POLL)
+
+    threading.Thread(target=loop, name="agent-inbox", daemon=True).start()
+    return lock
 
 
 TASKS = None
@@ -562,6 +659,8 @@ def queue_shared_session(thread_id, message):
 
 
 def reply(chat_id, text, reply_markup=None):
+    if not chat_id:  # not paired yet: nobody to tell
+        return None
     # Plain text avoids Telegram markup interpretation of terminal output.
     payload = {"chat_id": chat_id, "text": text[:4096]}
     if reply_markup is not None:
@@ -990,6 +1089,13 @@ def main():
         print(f"telegram-tmux-control: task store failed: {error}", file=sys.stderr)
         return 1
     state = read_state()
+    topic = CFG.get("AGENT_INBOX") or os.environ.get("TELEGRAM_TMUX_AGENT_INBOX", "")
+    if topic:
+        try:
+            peers = [u for u in (CFG.get("AGENT_INBOX_PEERS") or os.environ.get("TELEGRAM_TMUX_AGENT_INBOX_PEERS", "")).split(",") if u.strip()]
+            start_inbox(topic, state, [u.strip() for u in peers])
+        except Exception as error:  # the Telegram side still works without it
+            print(f"telegram-tmux-control: agent inbox {topic} disabled: {error}", file=sys.stderr, flush=True)
     try:
         # Establish the sender's TLS connection before the first user message,
         # making the immediate 🫡 acknowledgement a reused connection.

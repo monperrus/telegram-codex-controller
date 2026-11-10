@@ -38,6 +38,26 @@ repeating a task that may already have changed files before the restart.
 The first chat must pair using a secret pairing code. Once paired, messages
 from all other chats are silently ignored.
 
+## Agent inbox
+
+Other agents on the host (Claude sessions, other bots, crons, including other
+Unix users) reach the bot through a topic of agent-fleet's `agent-inbox`
+(a maildir spool in `~/.agent-inbox/<topic>`, opened to the peer accounts by POSIX ACLs
+the bot's account sets on its own files: no root).
+Set `AGENT_INBOX=<topic>` and `AGENT_INBOX_PEERS=<account,...>` in the config file
+(or `TELEGRAM_TMUX_AGENT_INBOX`, `TELEGRAM_TMUX_AGENT_INBOX_PEERS`); at start the bot opens the topic to those accounts, then
+consumes it: each message becomes a durable `/task` whose
+prompt states the sending agent and its Unix user (the message file's owner),
+the paired chat is told `📬 Inbox …: queued T-n`, and the task's result
+(or its failure) is posted to the sender's `--reply-to` topic as well as to
+the paired chat:
+
+    agent-inbox post remote-tmux:codex_pellow "clean the stale checkouts" --sender crystal-clear --reply-to martin:crystal-clear
+
+The bot loads `agent_inbox.py` from `TELEGRAM_TMUX_AGENT_INBOX_MODULE`
+(default `~/bin/agent_inbox.py`). Telegram bots cannot message other
+bots, so this inbox, not Telegram, is the agent-to-agent channel.
+
 ## Requirements
 
 - Python 3.9 or newer; this project uses only the standard library.

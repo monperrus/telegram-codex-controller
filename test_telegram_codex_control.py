@@ -200,3 +200,66 @@ class SharedSessionQueueTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+AGENT_INBOX = pathlib.Path(__file__).resolve().parent.parent / "agent-fleet" / "orchestrator" / "agent_inbox.py"
+
+
+@unittest.skipUnless(AGENT_INBOX.exists(), "agent-fleet's agent_inbox.py is not checked out beside this repo")
+class AgentInboxTests(unittest.TestCase):
+    def setUp(self):
+        import os
+        import tempfile
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.old_env = os.environ.get("AGENT_INBOX_DIR")
+        os.environ["AGENT_INBOX_DIR"] = self.tmp.name + "/inbox"
+        self.addCleanup(self._restore_env)
+        self.inbox = controller.load_agent_inbox(str(AGENT_INBOX))
+        self.sent = []
+        self.saved = (controller.INBOX, controller.INBOX_TOPIC, controller.TASKS, controller.TASK_WORKER, controller.reply)
+        self.addCleanup(self._restore)
+        controller.INBOX, controller.INBOX_TOPIC = self.inbox, "codex_pellow"
+        controller.TASKS = controller.TaskStore(self.tmp.name + "/tasks.sqlite3")
+        controller.TASK_WORKER = controller.TaskWorker(controller.TASKS)  # not started
+        controller.reply = lambda chat_id, text, reply_markup=None: self.sent.append((chat_id, text))
+
+    def _restore_env(self):
+        import os
+
+        if self.old_env is None:
+            os.environ.pop("AGENT_INBOX_DIR", None)
+        else:
+            os.environ["AGENT_INBOX_DIR"] = self.old_env
+
+    def _restore(self):
+        (controller.INBOX, controller.INBOX_TOPIC, controller.TASKS, controller.TASK_WORKER, controller.reply) = self.saved
+
+    def test_message_becomes_a_task_and_its_answer_goes_to_the_reply_topic(self):
+        self.inbox.post("codex_pellow", "clean stale checkouts", sender="crystal-clear", reply_to="crystal-clear")
+        controller.take_inbox({"chat_id": 42, "model": "m"})
+        self.assertEqual(self.inbox.pending("codex_pellow"), [])  # acked once durably queued
+        task = controller.TASKS.claim()
+        self.assertIn("Message from agent crystal-clear (Unix user ", task["prompt"])
+        self.assertIn("posted back to agent-inbox topic crystal-clear", task["prompt"])
+        self.assertTrue(task["prompt"].endswith("clean stale checkouts"))
+        self.assertEqual(task["model"], "m")
+        self.assertEqual(self.sent[0][0], 42)
+        self.assertIn("📬 Inbox codex_pellow: crystal-clear", self.sent[0][1])
+        import json
+
+        controller.answer_inbox(json.loads(task["origin"]), "done: 3 removed")
+        (answer,) = [self.inbox.read(p) for p in self.inbox.pending("crystal-clear")]
+        self.assertEqual(answer["text"], "done: 3 removed")
+        self.assertEqual((answer["sender"], answer["kind"], answer["reply_to"]), ("codex_pellow", "peer", "codex_pellow"))
+
+    def test_no_reply_topic_answers_only_the_operator(self):
+        self.inbox.post("codex_pellow", "status?", sender="cron")
+        controller.take_inbox({"chat_id": 42})
+        task = controller.TASKS.claim()
+        self.assertIn("only the operator sees your answer", task["prompt"])
+        controller.answer_inbox({"reply_to": ""}, "ok")  # nothing to post, no error
+
+    def test_unpaired_reply_is_silent(self):
+        self.assertIsNone(self.saved[4](None, "x"))
