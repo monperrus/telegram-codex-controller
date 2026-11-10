@@ -14,7 +14,8 @@ ExecStart=%h/.local/share/telegram-codex-controller/telegram-codex-control.py
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=yes
-PrivateTmp=yes
+# No PrivateTmp: in a user unit it implies a user namespace, where other accounts'
+# uids are unmapped, which breaks the agent inbox (peer ACLs, poster identity).
 
 [Install]
 WantedBy=default.target
